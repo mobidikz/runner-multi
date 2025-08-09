@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Runner 2D — Multi</title>
+  <style>
+    html, body { margin:0; padding:0; background:#0f172a; color:#e2e8f0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans'; }
+    .hud { position: fixed; inset: 0 auto auto 0; padding: 10px 14px; background: rgba(2,6,23,.6); border-bottom-right-radius: 14px; backdrop-filter: blur(4px); }
+    .hud h1 { margin:0; font-size: 18px; letter-spacing:.5px }
+    .info { font-size: 12px; opacity:.8 }
+    .scoreboard { position: fixed; top: 10px; right: 10px; padding: 10px 14px; background: rgba(2,6,23,.6); border-radius: 14px; min-width: 220px; }
+    .scoreboard h2 { margin: 0 0 6px; font-size: 14px; }
+    .scoreboard .row { display:flex; justify-content:space-between; gap:8px; font-size: 12px; padding:4px 0; border-bottom: 1px solid rgba(226,232,240,.06) }
+    .scoreboard .row:last-child { border-bottom: none }
+    canvas { display:block; margin: 0 auto; background: linear-gradient(#0ea5e9,#38bdf8); box-shadow: 0 12px 40px rgba(0,0,0,.25) }
+    .centerMsg { position: fixed; inset: 0; display:grid; place-items:center; pointer-events:none; font-size: 28px; font-weight: 700; text-shadow: 0 2px 10px rgba(0,0,0,.5) }
+    .touchBtn { position: fixed; inset: auto 20px 20px auto; width: 90px; height: 90px; border-radius: 9999px; background: rgba(255,255,255,.1); border: 2px solid rgba(255,255,255,.25); color: #e2e8f0; font-weight:700; }
+  </style>
+</head>
+<body>
+  <div class="hud">
+    <h1>Runner 2D — Multi</h1>
+    <div class="info">Espace / Clic : sauter · Double saut autorisé · Évitez les obstacles</div>
+  </div>
+  <div class="scoreboard">
+    <h2>Joueurs</h2>
+    <div id="list"></div>
+  </div>
+  <div class="centerMsg" id="center"></div>
+  <button class="touchBtn" id="touch">Saut</button>
+  <canvas id="game" width="900" height="360"></canvas>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    function mulberry32(a){return function(){let t=a+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296}};
+
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+
+    const G = 2000;          // gravité px/s²
+    const JUMP_V = -800;     // vitesse saut px/s
+    const SPEED = 280;       // vitesse sol px/s
+
+    let round = { seed: 1, startAt: Date.now() + 3000 };
+    let rng = mulberry32(round.seed);
+
+    const me = { id: 'me', x: 120, y: 0, vy: 0, w: 28, h: 42, color: '#f59e0b', onGround: false, alive: true, doubleJump: true, distance: 0 };
+    const others = new Map();
+
+    const groundY = H - 60;
+    let obstacles = [];
+
+    function resetObstacles() {
+      obstacles = [];
+      let t = 0;
+      const r = mulberry32(round.seed);
+      for (let i = 0; i < 10; i++) {
+        t += 800 + Math.floor(r() * 900);
+        const h = 30 + Math.floor(r() * 80);
+        obstacles.push({ spawnT: t, w: 40, h, passed: false });
+      }
+    }
+
+    function scheduleMoreObstacles(lastSpawn) {
+      const r = mulberry32(round.seed ^ Math.floor(lastSpawn));
+      let t = lastSpawn;
+      for (let i = 0; i < 6; i++) {
+        t += 700 + Math.floor( r() * 800 );
+        const h = 30 + Math.floor( r() * 90 );
+        obstacles.push({ spawnT: t, w: 40, h, passed: false });
+      }
+    }
+
+    function jump(){
+      if (!me.alive) return;
+      if (me.onGround) { me.vy = JUMP_V; me.onGround = false; }
+      else if (me.doubleJump) { me.vy = JUMP_V * 0.9; me.doubleJump = false; }
+    }
+    window.addEventListener('keydown', e=>{ if (e.code==='Space' || e.code==='ArrowUp') { e.preventDefault(); jump(); }});
+    window.addEventListener('mousedown', ()=>jump());
+    document.getElementById('touch').addEventListener('click', ()=>jump());
+
+    socket.on('round', (data) => {
+      round = data; rng = mulberry32(round.seed);
+      me.x = 120; me.y = 0; me.vy = 0; me.onGround = false; me.doubleJump = true; me.alive = true; me.distance = 0;
+      others.forEach(o=>{ o.alive = true; o.distance = 0; });
+      resetObstacles();
+      msgCenter(`Nouvelle manche dans ${(Math.max(0, round.startAt - Date.now())/1000).toFixed(1)}s`);
+      setTimeout(()=>{ msgCenter(''); socket.emit('ready'); }, Math.max(0, round.startAt - Date.now()));
+    });
+
+    socket.on('players', (list) => {
+      const seen = new Set();
+      for (const p of list) {
+        seen.add(p.id);
+        if (p.id === socket.id) { me.color = p.color; continue; }
+        if (!others.has(p.id)) others.set(p.id, { x: 120, y: 0, alive: true, color: p.color, distance: 0 });
+      }
+      for (const id of Array.from(others.keys())) if (!seen.has(id)) others.delete(id);
+    });
+
+    socket.on('state', (s) => {
+      const o = others.get(s.id); if (!o) return;
+      o.x = s.x; o.y = s.y; o.alive = s.alive; o.distance = s.distance;
+    });
+
+    let last = performance.now();
+    let lastObstacleCheck = 0;
+    function loop(now){
+      const dt = Math.min(0.032, (now - last) / 1000);
+      last = now;
+
+      const started = now >= round.startAt - performance.timing.navigationStart;
+      ctx.clearRect(0,0,W,H);
+
+      drawBackground(now);
+
+      if (started && me.alive) {
+        me.vy += G * dt;
+        me.y += me.vy * dt;
+        if (me.y >= 0) { me.y = 0; me.vy = 0; me.onGround = true; }
+        me.distance += SPEED * dt;
+      }
+
+      const elapsedMs = Math.max(0, (now - (round.startAt - performance.timing.navigationStart)) );
+      if (elapsedMs > lastObstacleCheck + 6000) {
+        scheduleMoreObstacles(elapsedMs);
+        lastObstacleCheck = elapsedMs;
+      }
+      const baseX = W - (elapsedMs / 1000) * SPEED;
+
+      drawGround(now);
+
+      const myRect = { x: me.x, y: groundY - me.h - me.y, w: me.w, h: me.h };
+
+      ctx.fillStyle = '#0b1020';
+      for (const ob of obstacles) {
+        const x = baseX + (ob.spawnT/1000) * SPEED;
+        const y = groundY - ob.h;
+        if (x + ob.w < 0 || x > W + 200) continue;
+        ctx.fillRect(x, y, ob.w, ob.h);
+        if (started && me.alive && rectsOverlap(myRect, {x, y, w: ob.w, h: ob.h})) {
+          me.alive = false;
+          socket.emit('dead');
+          msgCenter('💥 Oups !');
+          setTimeout(()=>msgCenter(''), 900);
+        }
+      }
+
+      drawRunner(myRect, me.color, me.alive);
+
+      others.forEach((o, id) => {
+        const yy = groundY - 42 - (o.y || 0);
+        drawRunner({ x: 120, y: yy, w: 28, h: 42 }, o.color, o.alive, true);
+      });
+
+      ctx.fillStyle = '#e2e8f0';
+      ctx.font = 'bold 16px system-ui';
+      ctx.fillText(`Distance: ${Math.floor(me.distance)}m`, 16, 28);
+
+      networkTick(now);
+      renderList();
+      requestAnimationFrame(loop);
+    }
+
+    function drawBackground(t){
+      const time = t * 0.02;
+      ctx.globalAlpha = 0.15;
+      for (let i = 0; i < 6; i++) {
+        const x = ( (time * (0.2 + i*0.15)) % (W+200) ) - 100;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.ellipse(W - x, 80 + i*28, 60, 20, 0, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawGround(t){
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(0, groundY, W, H-groundY);
+      const off = (t*0.25) % 40;
+      ctx.fillStyle = '#111827';
+      for (let x = -off; x < W; x += 40) ctx.fillRect(x, groundY, 12, 6);
+    }
+
+    function drawRunner(r, color, alive, ghost=false){
+      ctx.save();
+      if (ghost) ctx.globalAlpha = 0.7;
+      ctx.fillStyle = alive ? color : '#64748b';
+      ctx.fillRect(r.x, r.y, r.w, r.h);
+      ctx.fillStyle = '#0b1020';
+      ctx.fillRect(r.x + r.w*0.6, r.y + 6, 6, 6);
+      const leg = Math.sin(performance.now()/90) * 4;
+      ctx.fillRect(r.x+4, r.y+r.h-6, 8, 4);
+      ctx.fillRect(r.x+r.w-12, r.y+r.h-6+leg, 8, 4);
+      ctx.restore();
+    }
+
+    function rectsOverlap(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+
+    let lastNet = 0;
+    function networkTick(now){
+      if (now - lastNet < 50) return;
+      lastNet = now;
+      socket.emit('state', { x: me.x, y: me.y, distance: me.distance, alive: me.alive });
+    }
+
+    function msgCenter(text){ document.getElementById('center').textContent = text; }
+
+    function renderList(){
+      const list = document.getElementById('list');
+      const arr = [{ id: 'me', color: me.color, distance: me.distance, label:'(vous)', alive: me.alive }];
+      others.forEach((o,id)=>arr.push({ id, color:o.color, distance:o.distance, label:'', alive:o.alive }));
+      arr.sort((a,b)=>b.distance - a.distance);
+      list.innerHTML = arr.map(p=>`<div class=\"row\"><span><span style=\"display:inline-block;width:10px;height:10px;border-radius:9999px;background:${p.color};margin-right:6px;\"></span>${p.id==='me'?'Vous':p.id.slice(0,6)} ${p.label}</span><span>${Math.floor(p.distance)} m ${p.alive?'':'☠️'}</span></div>`).join('');
+    }
+
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
