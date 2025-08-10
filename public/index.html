@@ -40,8 +40,8 @@
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height;
 
-    const G = 2000;          // gravité px/s²
-    const JUMP_V = -800;     // vitesse saut px/s
+    const G = -2000;         // gravité px/s² (négative = tire vers le bas)
+    const JUMP_V = 800;      // vitesse saut px/s (positive = vers le haut)
     const SPEED = 280;       // vitesse sol px/s
 
     let round = { seed: 1, startAt: Date.now() + 3000 };
@@ -121,7 +121,7 @@
       if (started && me.alive) {
         me.vy += G * dt;
         me.y += me.vy * dt;
-        if (me.y >= 0) { me.y = 0; me.vy = 0; me.onGround = true; }
+        if (me.y <= 0) { me.y = 0; me.vy = 0; me.onGround = true; }
         me.distance += SPEED * dt;
       }
 
